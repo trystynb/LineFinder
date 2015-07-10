@@ -1,0 +1,1492 @@
+#!/usr/bin/python2.7
+
+""" 
+TB_LINEFINDER.PY
+V1.1 (10/07/2015)
+	-Added a file browser button for selecting files.
+	-Added a tutorial mode that can be turned on/off in the main menu.
+
+Author: Trystyn Berg (trystynb@uvic.ca)
+
+Stand-alone python application to identify spectral lines and save selected line list.
+
+
+PYTHON PACKAGE REQUIREMENTS:
+	TB_LINEFINDER was developed with:
+		-Python Version 2.7
+		-Matplotlib Version 1.4.1
+			-Need matplotlib.backends.backend_tkagg
+		-Tkinter Revision: 81008
+		-Numpy
+	Other verisons of above packages may work...
+
+INPUT FILE REQUIREMENTS
+	-ASCII file containing spectrum for plotting.
+		Each line in file must be in the format (whitespace delimeted):
+			WAVELENGTH FLUX
+		Any additional columns after first two are ignored.
+		MUST CONTAIN THE SAME NUMBER OF COLUMNS IN EACH LINE (unless commented)
+		Can use '#' at the start of any line to remove comment
+
+	-ASCII file containing a line list for identification.
+		Each line in the file must contain information on each spectral line
+		of interest in the format (whitespace delimited):
+			REST_WAVELENGTH ION SHORT_WL OSCILLATOR_STRENGTH
+
+			REST_WAVELENGTH - The rest wavelength of the spectral line (e.g. 1215.6701)
+			ION - The species (including ionization state) of the spectral line (e.g. HI)
+			SHORT_WL - A short identifier of the wavelength (e.g. 1215)
+				Needed to descrimante between absorption lines of a given ION
+			OSCILLATOR_STRENGTH - The oscillator strength of the feature (e.g. 0.4164)
+				This is only used for display purposes.
+
+			EXAMPLE:
+			1215.6701 HI 1215 0.4164
+
+		If Ly-alpha not present, TB_LINEFINDER will add it by default
+			(Morton 2003 values, as in example above)
+
+		MUST CONTAIN THE SAME NUMBER OF COLUMNS IN EACH LINE (unless commented)
+
+		Can use '#' at the start of any line to remove or comment
+
+OPTIONAL INPUT
+	-TB_LINEFINDER log file (see OUTPUT FILE below for description)
+OUTPUT FILE
+	-TB_LINEFINDER will generate a log file with the line list.
+		The output is a semicolon (;) delimited
+		Each line represents an spectral line identified in the format:
+			Z; ION; LINE; FLAG; VMIN; VMAX; NOTES; COLOUR;
+			Z - Redshift (to 5 decimal places) of line identified
+			ION - The Species of the line identified (from input linelist)
+			LINE - The SHORT_WL identifier from the input linelist
+			FLAG - A integer associated with the quality of the identified line
+			VMIN - The bluemost velocity (km/s) of the line profile
+			VMAX - The redmost velocity (km/s) of the line profile
+			NOTES - A string with any notes the user inputs
+			COLOUR - The matplotlib colour to denote feature in TB_LINEFINDER
+			
+		The recommended FLAG notation is a binary format with the following option
+			0 - No good/skip
+			1 - OK
+			2 - Blend
+			4 - Upper Limit/Non-detection
+			8 - Lower Limit/Saturated
+		If one prefers a different format, the user can use any integer.
+		FLAG is only used for the purposes of saving to the log as a reminder
+
+
+		When the output logfile is being read, any line beginning with '#'
+		will be ignored
+
+		For the purpose of future reference, the first two lines of the
+		logfile contain the input filenames in the format:
+
+		#!Line List: <INPUT LINELIST ASCII FILENAME>
+		#!Spectrum: <INPUT SPECTRUM ASCII FILENAME>
+
+
+
+KNOWN ISSUES:
+	Often MATPLOTLIB will change some features, which affect how the user can
+	interact with the application. If problem, please check your matplotlib version
+"""
+
+##############################
+###INTIALIZATION OF PROGRAM###
+##############################
+
+#Import necessary Matplotlib packages
+from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2TkAgg
+import matplotlib.pyplot as plt
+#Import Tkinter for GUI interface
+import Tkinter, tkFileDialog, tkMessageBox
+#import other basic pacakages
+import numpy as np
+import math
+import os,sys
+
+
+#Default input/output files necessary for running
+initinspec='test.ascii'
+initllist='linelist.lst'
+initlog='linefinder.log'
+
+
+#Command line inputs (Can be changed or set within GUI)
+inputs=sys.argv
+if len(sys.argv)==4:
+	initinspec=sys.argv[1]
+	initllist=sys.argv[2]
+	initlog=sys.argv[3]
+
+#List of colours to use (must be Matplotlib colours)
+mplcolours=['r','k','b','c','m','g']
+#DEBUG set to TRUE enables print statements throughout code for debugging purposes
+debug=False
+#debug=True
+
+
+#USETUTORIAL is a boolean to control message boxes that help use the software.
+#Thic can be turned on/off using the menu in the main Linefinder window.
+usetutorial=True
+#UseTutorial=False
+#############
+###VELSPEC###
+#############
+
+""" 
+VELSPEC takes a spectrum and converts the wavelength scale
+into a velocity scale (in km/s) based on an input wavelength
+
+call - TMPVEL,TMPSPEC=velspec(LINE,WVLNGTH,VMIN,VMAX,SPECTRUM)
+
+INPUT VARIABLES:
+	LINE - The wavelength to zero the velocity scale to (float)
+	WVLGNTH - A NUMPY array with the wavelength information of the spectrum
+	VMIN - The minimum velocity of the returned velocity scale (float)
+	VMAX - The maximum velocity of the returned velocity scale (float)
+	SPECTRUM - A NUMPY array with the flux information of the spectrum
+
+RETURNS:
+	TMPVEL - A NUMPY array of the Velocity-convereted scale (between VMIN and VMAX)
+	TMPSPEC - A slice of the input SPECTRUM, with each element corresponding to the
+		flux at the same element in the outputted TMPVEL
+
+NOTES:
+	If there is no coverage of the velocity specturm between VMIN and VMAX,
+	TMPSPEC will contain an array of zeros. If this occurs, a warning will
+	be printed to the screen.
+
+"""
+def velspec(line, wvlngth, vmin,vmax, spectrum):
+	c=3.0E5# speed of light (km/s)
+	vel=np.array((wvlngth-line)/line*c)#Convert to a velocity
+	#Check to see that VEL is within the specified VMIN/VMAX  range
+	if min(vel)<vmin and max(vel)>vmax:
+		ind1=(min(np.where(vel>vmin)[0]))#Find the index closest to vmin
+		ind2=(max(np.where(vel<vmax)[0]))#Find the index closest to vmax
+		tmpvel=vel[ind1:ind2]#Generate the velocity (x) array of intere$
+		tmpspec=spectrum[ind1:ind2]#Do the Same for the relative flux(y)
+		return tmpvel, tmpspec#Return slice of spectrum
+	#If not, return zero arrays and print warning
+	else:
+		print 'VELSPEC: Line not in velocity range'
+		return vel, np.zeros(len(vel))
+""" 
+SPECFITS reads the input spectrum ASCII file and returns the data in two NUMPY arrays
+
+Call - WVLNGTH,SPECTRUM=specfits(INFILE)
+
+INPUT VARIABLE:
+	INFILE - The input spectrum file.
+		Each line in file must be in the format (whitespace delimeted):
+			WAVELENGTH FLUX
+		Any additional columns after first two are ignored.
+		MUST CONTAIN THE SAME NUMBER OF COLUMNS IN EACH LINE (unless commented)
+		Can use '#' at the start of any line to remove comment
+
+OUTPUT VARIABLES:
+	WVLNGTH - A NUMPY array with the wavelength (first column) of the input spectrum
+	SPECTRUM - A NUMPY array with the flux (second column) of the input spectrum
+
+
+NOTES:
+	If no input spectrum file is found, WVLNGTH and SPECTRUM
+	will be NUMPY arrays full of zeros. A warning will be printed
+	to the screen.
+
+"""
+def specfits(infile):
+	#Check to see if file exists
+	if os.path.isfile(infile):
+		#REad spectrum file. All values must be floats
+		#Will ignore lines with '#' flag
+		#First column must be wavelength
+		#Second column must be flux
+		data=np.genfromtxt(infile,dtype=type(0.00),comments='#')
+		wvlngth=data[:,0]
+		spectrum=data[:,1]
+		#Return spectrum data
+		return wvlngth,spectrum
+	#If file doesn't exist
+	else:
+		#Print warning
+		print "WARNING: No spectrum file found"
+		#Return zero arrays
+		return np.zeros(100),np.zeros(100)
+
+
+""" 
+ISFLOAT checks if a given string is a float.
+
+Call - OUTPUT=IsFloat(STR)
+
+INPUT VARIABLE:
+	STR - A string for checking whether a float or not
+OUTPUT VARIABLE:
+	OUTPUT - A boolean value corresponding to whether STR
+	is a float (returns TRUE) or not (returns FALSE)
+
+"""
+
+def IsFloat(str):
+	#See if STR is a float
+	try:
+		float(str)
+	#If test fails, return FALSE
+	except Exception:
+		return False
+	#If passed the test, return TRUE
+	return True
+
+""" 
+WRITELOG writes the TB_LINEFINDER output logfile.
+
+call WriteLog(LOG,LOGFILE,LLISTFILE,FITS)
+
+INPUT VARIABLES:
+	LOG - A dictionary with the log information (see LOADLOG for structure)
+	LOGFILE - A string with the desired filename for the output logfile
+	LLISTFILE - A string with the input linelist filename
+	FITS - A string with the input spectrum filename
+
+NOTES:
+	If no logfile is provided, it will not save log and display warning
+	
+"""
+
+def WriteLog(log,logfile,llistfile,fits):
+	#Check to see if LOGFILE string has at least one character
+	if len(logfile)>1:
+		#Open LOGFILE buffer for writing
+		f=open(logfile,'w')
+		#Write the input files used to generate TB_LINEFINDER logfile
+		f.write('#!Line List: %s\n'%llistfile)
+		f.write('#!Spectrum: %s\n'%fits)
+		#Write column labels for user reference
+		f.write('#z;\t\tIon;\tline;\tflag;\tvmin;\tvmax;\tNotes;\tcolour\n')
+
+		#Loop through the LOG dictionary (redshift, ion/species, line identifier)
+		for z in log['zs']:
+			for ion in log['ions']:
+				for line in log['lines'][ion]:
+					#check if entry (keyed by z,ion,line) exists in log
+					if (z,ion,line) in log:
+						#If so, write to log file in format:
+						#Z; ION; LINE; FLAG; VMIN; VMAX; NOTES; COLOUR;
+						f.write('%s;\t'%z)
+						f.write('%s;\t'%ion)
+						f.write('%s;\t'%line)
+						f.write('%s;\t'%log[z,ion,line,'flag'])
+						f.write('%s;\t%s;\t'%log[z,ion,line,'vel'])
+						f.write('%s;\t'%log[z,ion,line])
+						f.write('%s;\n'%log[z,ion,line,'colour'])
+		#close Logfile writing buffer
+		f.close()
+		#Print stuff informing user of WRITELOG's success (including contents
+		#of file
+		print "Wrote logfile: %s"%logfile
+		print "Contents:\n"
+		print "***********\n"
+		os.system('cat %s'%logfile)
+		print "\n***********"
+	#If LOGFILE doesn't have a single character, cannot save. Print Warning
+	else: print "No log file provided. Did not Save."
+""" 
+LOADLOG loads the log file.
+
+
+
+Call: LoadLog(LOGFILE)
+
+INPUTS:
+	LOGFILE - String containing filename out TB_LINEFINDER output logfile.
+	The format of the log file is as follows:
+		For the purpose fo future reference, the first two lines of the
+		logfile contain the input filenames in the format:
+			#!Line List: <INPUT LINELIST ASCII FILENAME>
+			#!Spectrum: <INPUT SPECTRUM ASCII FILENAME>
+
+		The file is a semicolon (;) delimited
+		Each line represents an spectral line identified in the format:
+			Z; ION; LINE; FLAG; VMIN; VMAX; NOTES; COLOUR;
+			Z - Redshift (to 5 decimal places) of line identified
+			ION - The Species of the line identified (from input linelist)
+			LINE - The SHORT_WL identifier from the input linelist
+			FLAG - A integer associated with the quality of the identified line
+			VMIN - The bluemost velocity (km/s) of the line profile
+			VMAX - The redmost velocity (km/s) of the line profile
+			NOTES - A string with any notes the user inputs
+			COLOUR - The matplotlib colour to denote feature in TB_LINEFINDER
+			
+		The recommended FLAG notation is a binary format with the following option
+			0 - No good/skip
+			1 - OK
+			2 - Blend
+			4 - Upper Limit/Non-detection
+			8 - Lower Limit/Saturated
+		If one prefers a different format, the user can use any integer.
+		FLAG is only used for the purposes of saving to the log as a reminder
+
+		When the output logfile is being read, any line beginning with '#'
+		will be ignored
+
+OUTPUT:
+	LOG - A dictionary with all the log information.
+	The dictionary is keyed in the following way
+
+	LOG['zs'] - A list of redshifts for each system
+
+	LOG['ions'] - A list of all ion species (e.g. HI, CIV) within LOG.
+		All ion species should be found in the linelist input to TB_LINEFINDER
+
+	LOG['lines']- A dictionary of all the lines within LOG. This dictionary
+		is keyed by all the ion species in LOG['ions'].
+		For each ION in LOG['ions']:
+			LOG['lines'][ION] - A list of all the lines (identified by the
+			SHORT_WL identifier in the linelist input to TB_LINEFINDER
+
+	LOG[Z,ION,LINE] - COntains the NOTES information in the LOG dictionary. It
+		is keyed by (Z,ION,LINE), which are found in the lists of
+		LOG['zs'], LOG['ions'], and LOG['lines'][ION] (respectively)
+
+	LOG[Z,ION,LINE,'flag'] - COntains the FLAG information in the LOG dictionary. It
+		is keyed by (Z,ION,LINE,'flag'), which are found in the lists of
+		LOG['zs'], LOG['ions'], and LOG['lines'][ION] (respectively)
+
+	LOG[Z,ION,LINE,'colour'] - COntains the COLOUR information in the LOG dictionary. It
+		is keyed by (Z,ION,LINE,'colour'), which are found in the lists of
+		LOG['zs'], LOG['ions'], and LOG['lines'][ION] (respectively)
+
+	LOG[Z,ION,LINE,'vel'] - COntains the tuple (VMIN,VMAX) from the LOG dictionary. It
+		is keyed by (Z,ION,LINE,'vel'), which are found in the lists of
+		LOG['zs'], LOG['ions'], and LOG['lines'][ION] (respectively)
+
+NOTES:
+	If no LOGFILE string is found in the current directory, a blank 
+	LOG dictionary is loaded, with LOG['ion'], LOG['zs'], and LOG['lines']
+	generated. The file will be created at saving the log.
+
+"""
+def LoadLog(logfile):
+	#THe main LOG dictionary
+	log={}
+	#Key LOG withe the redshift and ion lists
+	log['zs']=[]
+	log['ions']=[]
+	#Key LOG with a sub-dictionary of the spectra lines
+	log['lines']={}
+	#Check if the LOGFILE all ready exists, and read it.
+	if os.path.isfile(logfile):
+		print "Loading logfile: %s"%logfile
+		#Read in the semicolon delimted file
+		data=np.genfromtxt(logfile,delimiter=';',dtype=type('str'),comments='#')
+		if len(data)>0:
+			#For each line in the file
+			for ii in range(len(data)):
+				#REad in each column, remove whitespace around the string,
+				#and format the data.
+				z=data[ii][0].strip()
+				ion=data[ii][1].strip()
+				line=data[ii][2].strip()
+				#If Z isn't in 'zs' list, add it.
+				if z not in log['zs']: log['zs'].append(z)
+				#If ION isn't in 'ions' list, add it.
+				#Also, need to add ION as a key to 'lines' dictionary
+				if ion not in log['ions']:
+					log['ions'].append(ion)
+					log['lines'][ion]=[]
+				#If LINE isn't in ['lines'][ION], include it
+				if line not in log['lines'][ion]: log['lines'][ion].append(line)
+				log[z,ion,line,'flag']=data[ii][3].strip()
+				log[z,ion,line,'vel']=data[ii][4].strip(), data[ii][5].strip()
+				log[z,ion,line]=data[ii][6].strip()#Add NOTE
+				log[z,ion,line,'colour']=data[ii][7].strip()
+	#If no LOGFILE is found, inform the user that is the case.
+	else:
+		print "Logfile not found at startup. Will create %s on exit"%logfile
+	#return LOG
+	return log
+
+""" 
+GETUSERINPUT - A function to obtain the necessary LOG information for a given spectral line
+	from the user via a prompt in the command line.
+
+Call - LOG=GetUserInput(ZSTR,ION,LINE,LOG)
+
+INPUTS:
+	ZSTR - THe redshift (string) of the identified line (in LOG['zs'] list)
+	ION - The ion species (string) in LOG['IONS'] list
+	LINE - The wavelgnth identifier (string) in LOG['lines'][ION] list
+	LOG - The LOG dictionary of TB_LINEFINDER. See LOGWRITER function above forstructure
+
+OUTPUT:
+	LOG - The modified LOG dictionary of TB_LINEFINER
+
+NOTE:
+	This function requires the use of the terminal in which TB_LINEFINDER
+	was called. 
+
+"""
+
+def GetUserInput(zstr,ion,line,log):
+	#Open tutorial message box saying what to do
+	if usetutorial: tkMessageBox.showinfo("Help Message", "Use the terminal window to customize the log.")
+	#List the available colours (MPLCOLOURS should be a list of matplolib colours)
+	print "Colours: ", mplcolours
+	#Query user for the COLOUR code from MPLCOLOURS
+	col=raw_input('Colour for line %s (%s): '%(ion,line))
+	#Check the user input is a matplotlib colour, otherwise set to black ('k')
+	if col not in mplcolours:
+		print "not valid colour; using black"
+		col='k'
+	#Save the colour into the LOG dictionary
+	log[zstr,ion,line,'colour']=col
+	#Ask for any notes about the spectral line identified. By default, the value
+	#is ''. Takes any string.
+	note=raw_input("Notes on line %s (%s) [if none, hit enter]: "%(ion,line))
+	#save to LOG dictionary
+	log[zstr,ion,line]=note
+	#Print list of possible flags on spectral line for reference.
+	print "Flags:"
+	print "\t0 - No good/skip"
+	print "\t1 - OK"
+	print "\t2 - Blend"
+	print "\t4 - Upper Limit/Non-detection"
+	print "\t8 - Lower Limit/Saturated"
+	#Query user for a FLAG. No input will return FLAG=0
+	flag=raw_input("Flag for line %s (%s) [default 0]: "%(ion,line))
+	#Check that FLAG is a float. Otherwise set to 0 (default)
+	#Notify user this happened
+	if IsFloat(flag)==False:
+		flag='0'
+		print "Invalid Flag %s; setting to 0"%flag
+	#If FLAG is not a valid combination of given flags,
+	#set the FLAG to 0 and notify user. 
+	elif float(flag)>=12:
+		print "Invalid Flag %s; setting to 0"%flag
+		flag='0'
+	#Save flag to the LOG dictionary
+	log[zstr,ion,line,'flag']=flag
+	#QUery user for VMIN and VMAX (the velocity bounds of the spectral line)
+	#If none is supplied (or is not a number), set the default to +/-50 km/s
+	vmin=raw_input("Blue velocity bound [default -50 km/s]: ")
+	if IsFloat(vmin)==False: vmin='-50'
+	vmax=raw_input("Red velocity bound [default 50 km/s]: ")
+	if IsFloat(vmax)==False: vmax='50'
+	#Save velocity information to LOG dictionary
+	log[zstr,ion,line,'vel']=vmin,vmax
+	#Return LOG dictionary
+	return log
+
+""" 
+LOADLINELIST - Loads the supplied linelist into a dictionary for TB_LINEFINDER
+
+Call - LLIST=LoadLineList(FILE)
+
+INPUT: FILE - The input ASCII file with the linelist for identification.
+
+		Each line in the file must contain information on each spectral line
+		of interest in the format (whitespace delimited):
+			REST_WAVELENGTH ION SHORT_WL OSCILLATOR_STRENGTH
+
+			REST_WAVELENGTH - The rest wavelength of the spectral line (e.g. 1215.6701)
+			ION - The species (including ionization state) of the spectral line (e.g. HI)
+			SHORT_WL - A short identifier of the wavelength (e.g. 1215)
+				Needed to descrimante between absorption lines of a given ION
+			OSCILLATOR_STRENGTH - The oscillator strength of the feature
+				This is only used for display purposes. (e.g. 0.4164)
+
+			EXAMPLE:
+			1215.6701 HI 1215 0.4164
+
+		If Ly-alpha not present, LOADLINELIST will add it by default
+		MUST CONTAIN THE SAME NUMBER OF COLUMNS IN EACH LINE (unless commented)
+		Can use '#' at the start of any line to comment
+
+OUTPUT: LLIST - A dictionary with the linelist information. LLIST is structured as follows:
+	LLIST['ions'] - A list of all the ion species in the linelist (ION column)
+	LLIST['lines'] - A dictionary (keyed by an ION in LLIST['ions']) of all the
+		SHORT_WL identifiers for a given ION
+
+		LLIST['lines'][ION] is a list of all the SHORT_WL for a given ION
+
+	LLIST[ION,SHORT_WL] - A tuple with (WAVELENGTH,OSCILLATOR_STRENGTH) for 
+		the spectral line identified ION,SHORT_WL
+
+NOTES
+	For simplicity, SHORT_WL is abbreviated LINE in the code. 
+	Will add Ly-alpha (HI 1215) by default if not present in FILE
+
+"""
+def LoadLineList(file):
+	#Read in FILE.
+	#FILE in format: wvl	ION	lineID	fval	
+	data=np.genfromtxt(file,comments='#',dtype=type('str'))
+	#Create LLIST, the linelist dictionary
+	llist={}
+	#Create the list of ions and lines
+	llist['ions']=[]
+	llist['lines']={}
+	#For each line in FILE
+	for ii in range(len(data)):
+		ion=data[ii][1]
+		line=data[ii][2]
+		#Convert WAVELENGTH and OSCILLATOR_STRENGTH to a float
+		wvl=float(data[ii][0])#WAVELENGTH
+		f=float(data[ii][3])#OSCILLATOR_STRENGTH
+		#Save tuple to list
+		llist[ion,line]=wvl,f
+		#Check to see if ION or LINE (aka SHORT_WL) are in LLIST
+		#'ions' or 'lines' lists. If not, add them.
+		if ion not in llist['ions']:
+			llist['ions'].append(ion)
+			llist['lines'][ion]=[]
+		if line not in llist['lines'][ion]: llist['lines'][ion].append(line)
+	#Line list requires Ly-alpha. Add to LLIST if not present.
+	if ('HI','1215') not in llist:
+		llist['HI','1215']=1215.6701,0.41640
+	#REturn LLIST
+	return llist	
+""" 
+CLASS LINEADDER - The graphical interface for checking all spectral lines in
+	linelist (LLIST dictionary) visually, selecting which spectral
+	lines to add to the logfile (LOG dictionary). This window contains
+	a 3-column list of every available spectral line as a radiobutton
+	for selecting which lines the user wants to add to the LOG dictionary
+
+
+Call - LA=LineAdder(RADIOLIST,VELPLOTWIN)
+
+INPUTS: RADIOLIST - A list of all the spectral lines available to generate
+		the radiobuttons for selection. Each element in RADIOLIST
+		is a tuple of (ION,LINE) (the spectrl line key in LLIST dictionary)
+	VELPLOTWIN - The TKinter Window that will contain the widget for selecting lines
+
+ATTRIBUTES:
+	LA.ADDLINES - A dictionary with all the spectral lines selected by the radiobuttons.
+		ADDLINES is keyed by every element in RADIOLIST. The value is either TRUE/FALSE
+		depending if the corresponding radiobutton was clicked (TRUE) or not (FALSE)
+	LA.MASTER - The master TKinter window (VELPLOTWIN)
+	LA.POPUP - The Frame of the TKinter window (i.e. the popup menu)
+	LA.VARLIST - A 	dictionary with the variables that contain whether a given
+		radiobutton has been pressed or not. VARLIST is keyed by each element
+		in RADIOLIST, and is a TKINTER.BOOLEANVAR.
+	LA.SAVEBUTTON - THe widget button for ending the widget to enable saving
+		information to LOG dictionary.
+	LA.CLOSELAMENU - A function to close VELPLOTWIN and return the class stuff
+		back to the place where LINEADDER was called.
+
+NOTES
+	THe only attribute that is really needed is LA.ADDLINES. The rest is just
+	for internal use of LINEADDER.
+
+	The grid of radiobuttons will have the same layout as the figure showing
+	the velocity plots corresponding to each radiobutton.
+
+	On pressing the SAVEBUTTON, VELPLOTWIN will be destroyed.
+
+"""
+class LineAdder:
+	#Intialize the class when called
+	def __init__(self,radiolist,VelPlotWin):
+		if debug: print "Initialize LineAdder Function"
+		#Define ADDLINES and populate each spectral line key
+		#from RADIOLIST with FALSE value (i.e. do not add line)
+		self.addlines={}
+		for key in radiolist:self.addlines[key]=False
+		#Define the parent window, and set up Tkinter frame
+		self.master=VelPlotWin
+		self.popup = Tkinter.Frame(self.master)
+		self.popup.grid()
+		self.master.title('LineAdder')
+		#Generate list of lines and radio buttons
+		self.varlist={}
+		#ROW is the row number in the LA.POPUP grid
+		row=1
+		#NCOL is the number of columns (set to 3) of radiobuttons
+		ncol=3
+		#A dummy variable to keep track of which column the next
+		#radiobutton should occupy
+		colnum=0
+		#FOr each spectral line key, create a radiobutton
+		#and the associated Tkinter variable for that button.
+		for key in radiolist:
+			self.varlist[key]=Tkinter.BooleanVar()
+			self.varlist[key].set(self.addlines[key])
+			rb=Tkinter.Radiobutton(self.popup,text='%s (%s)'%key,\
+				indicatoron=0,variable=self.varlist[key], \
+				value=True)
+			rb.grid(column=colnum,row=row,sticky='EW')
+			colnum+=1#Increment COLNUM for next radiobutton
+			#If COLNUM is at the maximum number of columns,
+			#increment ROW and reset COLNUM
+			if colnum==ncol:
+				colnum=0
+				row+=1
+		#If the row does not have enough buttons to fill it, increment
+		#ROW
+		if colnum>0: row+=1
+		#Define the "Save to Log" button for exiting the VELPLOTWIN window
+		#This will run the function CLOSELAMENU (below)
+		self.savebutton=Tkinter.Button(self.popup,text="Save to Log", command=self.closeLAMenu)#Runs OnFitButton function when clicked
+		self.savebutton.grid(column=0,row=row,columnspan=ncol,sticky='EW')
+		#Tell VELPLOTWIN to wait until window closes.
+		self.popup.wait_window()
+
+	#Function to close the LineAdder menu (i.e. VELPLOTWIN)
+	def closeLAMenu(self):
+		#Obtain the value of each spectral line radiobutton
+		for key in self.varlist:
+			val=self.varlist[key].get()
+			#If the value is 1 (i.e. on), update LA.ADDLINES
+			#to TRUE for the given spectral line key.
+			if val==1:
+				self.addlines[key]=True
+		if debug: print "LineAdder: Closing Menu"
+		#Destroy the TKINTER window VELPLOTWIN and it's frame.
+		self.popup.destroy()
+		self.master.destroy()
+		return
+""" 
+VELPLOTS - The function that plots all lines for a provided redshift 
+	within provided linelist LLIST as a velocity profile. It will
+	then spawn a Tkinter window to select the spectral lines to
+	add to the LOG dictionary using the LINEADDER
+	class (defined above). Upon line selection, the user will be queryed
+	about the COLOUR,FLAG, VMIN/VMAX and NOTE for each spectral line added
+	to the log with the GETUSERINPUT.
+
+Call - LOG=VelPlots(LOG,Z,LLIST,FITS,VELPLOTWIN,VPFIG, VELFIG)
+
+INPUTS: LOG - The LOG dictionary defined from READLOG with the
+		spectral information
+	Z - The redshift of the system of interest (float)
+	LLIST - The linelist dictionary LLIST from input linelist file
+	FITS - The name of the input spectrum ASCII file to be plotted
+	VELPLOTWIN - The TKinter window that contains the matplotlib Canvas
+	VELFIG - The matplotlib TKagg canvas for velocity profiles in VELPLOTWIN window
+	VPFIG - The matplotlib figure embedded in the VELFIG canvas
+
+OUTPUT: LOG - The edited LOG dictionary inputted into VELPLOTS.
+
+NOTES:
+	The layout of the VELPLOTWIN canvas should be in the same order
+	as the radiobuttons that appear in the LINEADDER GUI window. It
+	will have 3 columns total, and as many rows as needed for each 
+	spectral line within the wavelength range of the spectrum.
+
+"""
+def VelPlots(log,z,llist,fits,VelPlotWin,VPfig,VelFig):
+	#Load the spectrum from the ascii file with SPECFITS
+	#IWVLNGTH and ISPECTRUM are numpy arrays with the
+	#wavelength and flux of the spectrum. 
+	iwvlngth, ispectrum=specfits(fits)
+	if debug: print "VelPlots Loaded spectrum"
+	#LKEYS will contain a list of all the spectral
+	#line keys within LLIST that are within the 
+	#wavelength range of the spectrum.
+	lkeys=[]
+	#Sort the ions list alphabetically to put
+	#IONS in order
+	llist['ions'].sort()
+	#Loop through each ION/LINE combination in the linelist
+	#to identify which lines are covered by the spectrum.
+	#If that is true, add the LLIST key to LKEYS.
+	for ion in llist['ions']:
+		#Sort the lines for a given ION so they are in order
+		llist['lines'][ion].sort()
+		for line in llist['lines'][ion]:
+			#DOuble check ION/LINE  is in LLIST
+			#If this fails, something is fundamentally flawed...
+			if (ion,line) in llist:
+				#Get the wavelength of the spectral line
+				wvl,f=llist[ion,line]
+				#Redshift the line....
+				wvl=wvl*(1.0+z)
+				if debug: print "Wavelength check: is %.3f within (%.3f,%.3f)"%(wvl,min(iwvlngth),max(iwvlngth))
+				#If redshifted line covered by spectrum, add to LKEYS
+				if wvl>min(iwvlngth) and wvl<max(iwvlngth):
+					if debug: print "Passed wavelngth check",ion,line
+			 		lkeys.append((ion,line))
+	#NCOL is the number of columns in the VELPLOTWIN velocity profile grid
+	ncol=3
+	#NROW is the number of rows in the VELPLOTWIN grid.
+	nrow=len(lkeys)/ncol+1
+	if debug: print "VelPlots panel Nrow,ncol,nkeys:", nrow,ncol,len(lkeys)
+	#Set the limits of the plotted velocity profile to be +/- 1000 km/s
+	vmin=-1000
+	vmax=1000
+	if debug: print "VelPlots Plotting lines:",lkeys
+	#RADIOLIST is the list of LLIST spectral lines that require
+	#radiobuttons in the LINEADDER GUI window
+	radiolist=[]
+	#Loop through all spectral lines for plotting and plot them!
+	for ii in range(len(lkeys)):
+		#Get the spectral line key (ION,LINE) tuple
+		lkey=lkeys[ii]
+		#Grabd the wavelenght and oscilaltor strength of the line
+		wvl,f=llist[lkey]
+		#WVL should be Redshifted 
+		wvl=wvl*(1.0+z)
+		#IND refers to the matplotlib subplot index for the
+		#velocity profile
+		ind=ii+1
+		#Get the spectrum slice within vmin/vmax of the spectrum
+		#using VELSPEC (centred at the redshifted wavelength WVL)
+		#TMPVEL is the velocity array, TMPSPEC is the corresponding flux
+		tmpvel,tmpspec=velspec(wvl, iwvlngth, vmin,vmax, ispectrum)
+		#Add a subplot to the VELPLOTWIN figure, call it AX
+		ax=VPfig.add_subplot(nrow,ncol,ind)
+		#Plot the velocity profile to AX
+		ax.plot(tmpvel,tmpspec,'k',drawstyle='steps')
+		#Add key to RADIOLIST
+		radiolist.append(lkey)
+		#GEt y-axis limits of the velocity profile, and modify
+		#YMIN to include and extra 10% of the original heaigh
+		ymin,ymax=ax.get_ylim()
+		ymin=ymin-0.1*(ymax-ymin)
+		#get the ION,LINE identifier from the spectral line key
+		ion,line=lkey
+		#Set the title of the subplot to the idetifier, and 
+		#provide the oscillator strength for reference
+		title='%s %s\nf=%.5f'%(ion,line,f)
+		ax.set_title(title)
+		#Loop through the current LOG dictionary, and plot
+		#a vertical dashed line to inform the user if there
+		#is potentially another line from a different system.
+		#LZ is the redshift of a system in the LOG allready
+		for lz in log['zs']:
+			#LION is the ion in the log
+			for lion in log['ions']:
+				#LLINE is the line identifier for LION
+				for lline in log['lines'][lion]:
+					#If the log has the key (LZ,LION,LLINE) and (LION,LLINE) are in the linelist LLIST
+					if (lion,lline) in llist and (lz,lion,lline) in log:
+						#Get the wavelength of the LION,LLINE
+						#And redshift it by LZ
+						wl,f=llist[lion,lline]
+						#Get the velocity of this line
+						#with respect to the the spectral
+						#Line being plotted.
+						vel=(wl*(1.0+float(lz))-wvl)/wvl*2.998E5
+						#If it's ALSO within the velocity
+						#profile of the spectral line plotted
+						if vel>vmin and vel<vmax:
+							#Plot a vertical dashed line, and add
+							#a label to inform the user of the contaminating
+							#line.
+							if debug: 'VelPlot Adding Log redshift',lz
+							col=log[lz,lion,lline,'colour']
+							ax.plot([vel,vel],[ymin,ymax],'--'+col, linewidth=3)
+							fval='%.5f'%f
+							label='z=%s\n%s %s'%(lz,lion,lline)
+							ax.text(vel,ymax,label,color=col,va='top',ha='left',rotation='vertical')
+		#Set the subplot velocity limits to the velocity range specified by VMIN/VMAX
+		ax.set_xlim(vmin,vmax)
+	#Update the VELFIG canvas
+	VelFig.draw()
+	if debug: print "VelPlots RadioList:", radiolist
+	#Use the LINEADDER class to generate the GUI window to select lines
+	#for adding to LOG
+	lineadder=LineAdder(radiolist,VelPlotWin)
+	#ADDLINES is a dicitionary keyed by the elements of RADIOLIST.
+	#Each key corresponds to whether or not the line should be added
+	#(true if add, false if not)
+	addlines=lineadder.addlines
+	if debug: print "VelPlots addlines:", addlines
+	#COnvert the redshift to a string for the log. SHould be 5 decimcal places.
+	zstr='%.5f'%z
+	#Loop through each spectral line  withing ADDLINES
+	for key in addlines:
+		#If the user selected it (i.e. value==True)
+		if addlines[key]==True:
+			#Check if that system allready exists. If not
+			#add ZSTR to the list of redshifts in LOG['zs']
+			if zstr not in log['zs']: log['zs'].append(zstr)
+			#Obtain the ION,LINE identifier of the spectral line
+			ion,line=key
+			#Check to see if ION allready in LOG['ions'] list.
+			#If not, add it, and make an entry into LOG['lines'] dictionary
+			#for that ion.
+			if ion not in log['ions']:
+				log['ions'].append(ion)
+				log['lines'][ion]=[]
+			#IF LINE identifier not in the LOG['lines'][ION] list, add it
+			if line not in log['lines'][ion]: log['lines'][ion].append(line)
+			#Pass the system/spectral line information to GETUSERINPUT
+			#to query user for log information about the line, and update
+			#the LOG dictionary appropriately
+			log=GetUserInput(zstr,ion,line,log)
+	#Now you have an updated LOG dictionary for a given system redshift, return it.
+	return log
+""" 
+CLASS LINEFINDER_TK is the main TKINTER interface for TB_LINEFINDER. IT grabs the input/output file names
+	and initializes the program by plotting the spectrum. Once loaded, the user can use keyboard
+	shortcuts to identify spectral lines (from the inputted linelist) to a logfile
+	which is sotred in the LOG dictionary
+
+CALL  LF=linefinder_tk(None)
+
+ATTRIBUTES
+	LF.root - The Tkinter window identifier drop menu, and buttons
+	LF.entryIn - TKINTER string vairable that contains the input spectrum file name
+	LF.fits - The spectrum file name (string) that is obtained from LF.entryIn
+	LF.entryOut - TKINTER string variable that contains the output log file name	
+	LF.logfile - The logfile filename string obtained from LF.entryOut
+	LF.entryLlist - TKINTER string variable with input linelist filename
+	LF.log - the LLOG dictionary that contains the data to be written to LF.entryLlist
+	LF.SProot - The TKInter parent for the full spectrum plot window
+	LF.SpecPlot - The matplotlib canvas embedded in LF.SPROOT
+	LF.ax - the Matplotlib Axes instance for the full spectrum plot window (LF.SpecPlot)
+	LF.fig - Matplotlib figure instance for the full spectrum plot window (LF.SpecPlot)
+
+	LF.onExit() - function to close the LF window and exit TB_LINEFINDER for good
+	LF.initialize() - The initilization functuon of the LF window (set up the user input fields,
+	LF.PlotSpec() - Function to plot the spectrum from LF.fits
+	LF.PlotFits() - Function to generate the the TKinter LF.SProot window
+	LF.UpdatePlot() - Refresh the LF.SpecPlot canvas with current LOG dictionary content
+	LF.LogMenu(LOGMENUWIN) - Defines the TKinter window for editing the current LOG dictionary content
+		in the LOGMENUWIN child window.
+	LF.OnChangeLog() - Update LOG dictionary content with user input (done via command line)
+	LF.OnRemoveLine() - Remove a spectral line from the LOG dictrionary for a certain system
+	LF.OnRemoveSystem() - Remove an entire absorption system from the LOG dictionary
+	LF.OnExitEdit() - Closes the LOG Editing Menu GUI started in LF.LogMenu()
+	LF.UpdateIonMenu() - Update the drop-down Ion menu in the LF.LogMenu to contain only ions in LOG 
+	LF.UpdateLineMenu() - Update the drop-down line menu to include lines for a given ion in the LOG
+	LF.onQ() - Function when 'Q' is pressed in LF.SpecPlot window (Quits LineFinder)
+	LF.onVelPlots(Z) - Sets up the appropriate TKinter windows and runs the VELPLOTS function for a given redshift
+	LF.onL(EVENT) - Function when 'L' is pressed in LF.SpecPlot window (Runs LF.onVelPlots for cursour position on Ly-a line)
+	LF.onZ() - Function when 'Z' is pressed in LF.SpecPlot window (gets redshift from user in command line and runs LF.onVelPlots)
+	LF.onA(EVENT) - Function when 'A' is pressed in LF.SpecPlot window (Runs LF.onVelPlots for cursour position on a given line from command line)
+	LF.onE() - Function when 'E' is pressed in LF.SpecPlot window (Runs LF.OnChangeLog)
+	LF.onH() - Function when 'H' is pressed in LF.SpecPlot window (displays key options)
+	LF.onKey(EVENT) - Obtain LF.SpecPlot event and decide which function to run.
+	LF.OnFindLines() - The initialization of the Line Finder application. Sets up LF.SpecPlot and starts listening for interactive events
+	LF.getSpecFile() - File browser window to select the input spectrum ascii file
+	LF.getLlistFile() - File browser window to select the input linelist file
+	LF.getOutFile() - File browser window to select the name of the output log file
+
+NOTES
+	This is the main driver of the GUI interface, and is where new features should be added.
+
+	KNOWN BUG - LF.LineMenu() will always complain about missing keys in dictionary on first use of it. Ignore unless repeated.
+		The message reads:
+
+		Traceback (most recent call last):
+		  File "/usr/lib64/python2.7/lib-tk/Tkinter.py", line 1470, in __call__
+		    return self.func(*args)
+		  File "tb_linefinder.py", line 1103, in UpdateIonMenu
+		    self.ion.set(zions[0])
+		  File "/usr/lib64/python2.7/lib-tk/Tkinter.py", line 1826, in __getattr__
+		    return getattr(self.tk, attr)
+		AttributeError: ion
+		Exception in Tkinter callback
+		Traceback (most recent call last):
+		  File "/usr/lib64/python2.7/lib-tk/Tkinter.py", line 1470, in __call__
+		    return self.func(*args)
+		  File "tb_linefinder.py", line 1114, in UpdateLineMenu
+		    for line in self.log['lines'][self.ion.get()]:
+
+
+"""
+
+class linefinder_tk(Tkinter.Tk):# Base for standard window
+        #This defines the main window
+        def __init__(self,parent):
+		#Root identifier for Tkinter window
+                self.root=Tkinter.Tk.__init__(self,parent)
+                #self.parent =parent
+                self.initialize()
+	#Function to quit the entire GUI
+        def onExit(self):
+                print "Quitting..."
+                self.quit()
+	def onTutorial(self):
+		global usetutorial
+		if usetutorial:
+			usetutorial=False
+			tkMessageBox.showinfo("Help Message", "Tutorial mode is now off.")
+		else:
+			usetutorial=True
+			tkMessageBox.showinfo("Help Message", "Tutorial mode is now on.")
+		return
+	#Browser dialog buttons for input/output files...
+	#... To get the Input spectrum file
+	def getSpecFile(self):
+		#Options for the browser dialog window
+		browser_opt={}
+		#Have access to all files
+		browser_opt['filetypes']=[('all files','.*')]
+		#Set initial file to current spectrum file
+		browser_opt['initialfile']=self.specIn.get()
+		#Label the window
+		browser_opt['title']='Select Input spectrum (ascii)'
+		#Run the dialog, and save the output to the spectrum file name
+		self.specIn.set(tkFileDialog.askopenfilename(**browser_opt))
+		return
+	#... To get the Input linelist file
+	def getLlistFile(self):
+		#Options for the browser dialog window
+		browser_opt={}
+		#Have access to all files
+		browser_opt['filetypes']=[('all files','.*')]
+		#Set initial file to current linelist file
+		browser_opt['initialfile']=self.entryLlist.get()
+		#Label the window
+		browser_opt['title']='Select Line List'
+		#Run the dialog, and save the output to the llist file name
+		self.entryLlist.set(tkFileDialog.askopenfilename(**browser_opt))
+		return
+	#... To get the output logfile
+	def getOutFile(self):
+		#Options for browser dialog window
+		browser_opt={}
+		#Have access to all files
+		browser_opt['filetypes']=[('all files','.*')]
+		#Label the window
+		browser_opt['title']='Name of output file'
+		#Set initial file to current ouput file
+		browser_opt['initialfile']=self.entryOut.get()
+		#Run the dialog, and save the output to the logfilename
+		self.entryOut.set(tkFileDialog.askopenfilename(**browser_opt))
+		return
+
+
+	#Function for initilizaing the main GUI window
+        def initialize(self):
+		#Open tutorial message box saying what to do
+		if usetutorial: tkMessageBox.showinfo("Help Message", "Select input spectrum and linelist file, and name output logifle.")
+                self.grid()
+                #Drop down menu for main GUI (e.g. exit button)
+                mb=Tkinter.Menubutton(self,text='Menu',relief="raised")
+                mb.grid(column=0,row=0, sticky='EW')
+                picks=Tkinter.Menu(mb,tearoff=0)
+                picks.add_command(label="Tutorial mode on/off",command=self.onTutorial)
+                picks.add_command(label="Exit",command=self.onExit)
+                mb.config(menu=picks)
+
+                #########################
+                #Define the Input fields#
+                #########################
+
+                #The label for the spectrum file
+                labelIn=Tkinter.StringVar()#Name of string in label
+                labelin=Tkinter.Label(self,textvariable=labelIn,\
+                        anchor="w",fg="black")
+                labelin.grid(column=0, row=1, sticky='EW')
+                labelIn.set(u"Input spectrum:")#Initial value of Variable
+
+                #The field for the spectrum file
+                self.specIn=Tkinter.StringVar()
+                entryin=Tkinter.Entry(self,textvariable=self.specIn)#,anchor="w", fg="black")
+                entryin.grid(column=1,row=1,stick='EW')
+                self.specIn.set(initinspec)
+		
+		#Button for input spectrum file browser
+		specbutton=Tkinter.Button(self,text="Search",command=self.getSpecFile)
+		specbutton.grid(column=2,row=1, sticky='EW')
+
+                #The label for the linelist
+                labelLlist=Tkinter.StringVar()#Name of string in label
+                labelllist=Tkinter.Label(self,textvariable=labelLlist,\
+                        anchor="w",fg="black")
+                labelllist.grid(column=0, row=2, sticky='EW')
+                labelLlist.set(u"Linelist:")#Initial value of Variable
+
+                #The field for the linelist
+                self.entryLlist=Tkinter.StringVar()
+                entryllist=Tkinter.Entry(self,textvariable=self.entryLlist)#,anchor="w", fg="black")
+                entryllist.grid(column=1,row=2,stick='EW')
+                self.entryLlist.set(initllist)
+
+		#Button for input linelist browser
+		llistbutton=Tkinter.Button(self,text="Search",command=self.getLlistFile)
+		llistbutton.grid(column=2,row=2, sticky='EW')
+		
+
+                #The label for the output logfile
+                labelOut=Tkinter.StringVar()#Name of string in label
+                labelout=Tkinter.Label(self,textvariable=labelOut,\
+                        anchor="w",fg="black")
+                labelout.grid(column=0, row=3, sticky='EW')
+                labelOut.set(u"Output logfile:")#Initial value of Variable
+
+                #The field for the output logfile
+                self.entryOut=Tkinter.StringVar()
+                entryout=Tkinter.Entry(self,textvariable=self.entryOut)#,anchor="w", fg="black")
+                entryout.grid(column=1,row=3,stick='EW')
+                self.entryOut.set(initlog)
+
+		#Button for output logfile browser
+		outlogbutton=Tkinter.Button(self,text="Search",command=self.getOutFile)
+		outlogbutton.grid(column=2,row=3, sticky='EW')
+
+
+                #Define button for Finding lines
+                plotbutton=Tkinter.Button(self,text=u'Find Lines!',\
+                        command=self.OnFindLines)#Runs OnFitButton function when clicked
+                plotbutton.grid(column=0,row=4,columnspan=3,sticky='EW')
+
+		#Initialize the LOG dictionary
+		self.log=None
+	#Function to Plot the input spectrum
+	def PlotSpec(self):
+		#Load spectrum and plot it to SpecPlot window
+		iwvlngth, ispectrum=specfits(self.fits)
+		self.ax.plot(iwvlngth,ispectrum,'k',drawstyle='steps')
+		self.SpecPlot.draw()
+		#The default scaling removes the +/- 2.5 percentile outliers.
+		#This number was set arbitrarily for practice spectrum, and might not be appropriate
+		ymin=np.percentile(ispectrum,2.5)
+		ymax=np.percentile(ispectrum,97.5)
+		#Set the y axis limits based on removing outliers
+		self.ax.set_ylim(ymin,ymax)
+		if debug: print "PlotSpec flux limits: ", ymin, ymax
+		return
+	#Function to load the Tkinter window for plotting the full spectrum
+	def PlotFits(self):
+		#Generate the figure for plotting
+		self.fig=plt.figure()
+		#Generate the Tkinter window
+		self.SProot=Tkinter.Tk()
+		#Name of TKInter window
+		self.SProot.wm_title("Full Spectrum")
+		#Create a TkAgg canvas for plotting using self.fig
+		self.SpecPlot=FigureCanvasTkAgg(self.fig,master=self.SProot)
+		self.SpecPlot.get_tk_widget().pack(side=Tkinter.TOP, fill=Tkinter.BOTH, expand=1)
+		#Add a toolbar for zooming, scrolling, resetting, etc of the plot window
+		NavSpecPlot=NavigationToolbar2TkAgg(self.SpecPlot, self.SProot)
+		#Generate an matplotlib axis for plotting the spectrum
+		self.ax=plt.subplot(1,1,1)
+		#Plot the spectrum
+		self.PlotSpec()
+		return
+
+
+	#The function related to updating the full specturm plot with the log information
+	#This includes coloured vertical lines for each identified feature and the label
+	#the redshift and absorption feature at that line
+	def UpdatePlot(self):
+		#Clear the MPL axis and reset the canvas
+		self.ax.clear()
+		self.SpecPlot.draw()
+		self.fig.set_canvas(self.SpecPlot)
+		#Replot the spectrum from input file
+		self.PlotSpec()
+		if debug: print "Updating Plot", self.log
+		#Get the y-limits of the plot for making veritcal lines
+		ymin,ymax=self.ax.get_ylim()
+		#Go through each system and plot each absorption feature in the log.
+		#Use the colour identified in LOG[Z,ION,LINE,'colour']
+		#Label with Z, ION, LINE
+		for z in self.log['zs']:
+			if debug: print "UpdatePlot redshift", z
+			for ion in self.log['ions']:
+				if debug: print "\tUpdatePlot ion", ion
+				for line in self.log['lines'][ion]:
+					if debug: print "\t\tUpdatePlot line", line
+					if debug: print "\t\t In linelist:", (ion,line) in self.llist
+					if debug: print "\t\t In log:", (z,ion,line) in self.log
+					if (ion,line) in self.llist and (z,ion,line) in self.log:
+						if debug: print "\t\t\tUpdatePlot", z, ion, line
+						wl,f=self.llist[ion,line]
+						wl=wl*(1.0+float(z))
+						#By default use black if no colour in LOG
+						col='k'
+						if (z,ion,line,'colour') in self.log:
+							col=self.log[z,ion,line,'colour']
+						self.ax.plot([wl,wl],[ymin,ymax],':'+col)
+						fval='%.5f'%f#Oscillator strength string if necessary
+						label='z=%s\n%s %s'%(z,ion,line)
+						self.ax.text(wl,ymax,label,color=col,va='top',ha='left',rotation='vertical')
+					#else: print "Warning: Line %s %s not in linelist."%(ion,line)
+		#Redraw the canvas to update the plotting window
+		self.SpecPlot.draw()
+		if debug: print "UpdatePlot Draw Figure" 
+		return
+	# Get user input about updating the LOG file in LOGMENU using the command line
+	def OnChangeLog(self):
+		if debug: print "Running OnChangeLog"
+		#Grab the redshift (ZZ), ion (IION), and line identifier (LLINE) in the LOG keys for updating
+		zz=self.z.get()
+		iion=self.ion.get()
+		lline=self.line.get()
+		self.log=GetUserInput(zz,iion,lline,self.log)
+		return
+	#What to do when the "Remove system" button is pressed in the LogMenu widget
+	def OnRemoveSystem(self):
+		if debug: print "Running OnRemoveSystem"
+		#Obtain the redshift of the desired removed system selected via the drop menu 
+		rmz=self.z.get()
+		#go through each ION/LINE combination, and see if it has an entry for the system at redshfit RMZ 
+		for rmion in self.log['ions']:
+			for rmline in self.log['lines'][rmion]:
+				#If combination is in the LOG, remove it
+				if (rmz,rmion,rmline) in self.log:
+					self.log.pop((rmz,rmion,rmline),0)
+					self.log.pop((rmz,rmion,rmline,'flag'),0)
+					self.log.pop((rmz,rmion,rmline,'colour'),0)
+					self.log.pop((rmz,rmion,rmline,'vel'),0)
+		#Figure out which index in the list of redshifts the RMZ absorber corresponds to,
+		#and remove from the redshift list
+		inds=np.where(rmz==self.log['zs'])[0]
+		for ind in inds:
+			self.log['zs'].pop(ind)
+		#Check to see if there are any ions/lines that are no longer present in the LOG.
+		#if so, they need to be removed from the list of possible lines and ions.
+		for rmion in self.log['ions']:
+			removeion=True#Boolean to see if whether or not the ion needs to be removed
+			for rmline in self.log['lines'][rmion]:
+				removeline=True#boolean to see if the line of the ion needs to be removed
+				for rmz in self.log['zs']:
+					#if the ion/line combination is in LOG all ready after removing redshift, we need to keep it.
+					if (rmz,rmion,rmline) in self.log:
+						#Set the boolean values to false so ION/line combo is not removed
+						removeline=False
+						removeion=False
+				#Get rid of line from list if deemed apprpriate to remove
+				if removeline:
+					inds=np.where(rmline==self.log['lines'][rmion])[0]
+					for ind in inds:
+						self.log['lines'][rmion].pop(ind)
+			#If the list of possible lines is empty and we have said we should remove the ion,
+			#remove the ion appropriately
+			if len(self.log['lines'][rmion])<1 and removeion:
+				inds=np.where(rmion==self.log['ions'])[0]
+				for ind in inds:
+					self.log['ions'].pop(ind)
+		#Update the drop menus appropriately to encompass any changes
+		self.UpdateIonMenu()
+		self.UpdateLineMenu()
+		self.UpdateRedshiftMenu()
+		return
+	#if a specific line for a given absorption system is desire to be removed, get rid of the
+	#specific entry in the LOG (including flags, colours, and velocity information)
+	def OnRemoveLine(self):
+		if debug: print "Running OnRemoveSystem"
+		#Grab the current redshift, ion, and line ID for removal
+		rmz=self.z.get()
+		rmion=self.ion.get()
+		rmline=self.line.get()
+		#Double check the corresponding key is in the dictionary, if so remove it
+		if (rmz,rmion, rmline) in self.log:
+			self.log.pop((rmz,rmion,rmline),0)
+			self.log.pop((rmz,rmion,rmline,'flag'),0)
+			self.log.pop((rmz,rmion,rmline,'colour'),0)
+			self.log.pop((rmz,rmion,rmline,'vel'),0)
+		#Update the drop-down menus
+		self.UpdateIonMenu()
+		self.UpdateLineMenu()
+		return
+	#Save the log file and exit the LogMenu editing widget
+	def OnExitEdit(self):
+		WriteLog(self.log,self.logfile,self.llistfile,self.fits)
+		#Close the widgets
+		self.EditPopup.destroy()
+		self.EditMaster.destroy()
+		return
+	#Update the drop-down menu displayin the ions in the LogMenu list
+	def UpdateIonMenu(self, *args):
+		zions=[]
+		#Comb LOG dictionary for every ion in LOG, and add it to a list of possible ions
+		for ion in self.log['ions']:
+			for line in self.log['lines'][ion]:
+				if ion not in zions:
+					if (self.z.get(),ion,line) in self.log:
+						zions.append(ion)
+		if debug: print "UpdateIonMenu set self.ion",zions[0]
+		#Set the default value to the first value in the list
+		self.ion.set(zions[0])
+		#update the IonMenu by removing all previous entries and adding the new
+		menu=self.IonMenu['menu']
+		menu.delete(0,'end')
+		for ion in zions:
+			menu.add_command(label=ion, command=lambda ion=ion: self.ion.set(ion))
+		return
+	#Update drop-down menu displaying the lines for the ION selected in the Ion drop-down menu in LogMenu
+	def UpdateLineMenu(self, *args):
+		zlines=[]
+		#Comb LOG dictionary for every line for the given ion in the LOG and add to list of possible lines
+		for line in self.log['lines'][self.ion.get()]:
+			if (self.z.get(),self.ion.get(),line) in self.log:
+				zlines.append(line)
+		if debug: print "UpdateLineMenu linelist",zlines
+		#Set the default value to first line in list
+		self.line.set(zlines[0])
+		#Clear drop down meny and add new line list to it.
+		menu=self.LineMenu['menu']
+		menu.delete(0,'end')
+		for line in zlines:
+			menu.add_command(label=line, command=lambda line=line: self.line.set(line))
+		#example code for changing menus which inspire the previous two functions....
+		""" 	
+		    def updateoptions(self, *args):
+		        countries = self.dict[self.variable_a.get()]
+		        self.variable_b.set(countries[0])
+		        menu = self.optionmenu_b['menu']
+		        menu.delete(0, 'end')
+		        for country in countries:
+		           menu.add_command(label=country, command=lambda country=country: self.variable_b.set(country))
+		"""
+		return
+	#Function setting up the log-editing menu, with a list of absorbtion redshifts, ions, and lines.
+	#Options include editing the log of a given entry, remove a system redshift, or a line at a given redshift.
+	def LogMenu(self,LogMenuWin):# Base for Log Menu
+	        #This defines the Log Menu window
+		self.EditMaster=LogMenuWin
+		self.EditMaster.title('Log Editing Menu')
+		self.EditPopup = Tkinter.Frame(self.EditMaster)
+		self.EditPopup.grid()
+		if debug: print "Loading Log editing Menu"
+		#System redshift dropdown menu
+		labelzvar=Tkinter.StringVar()
+		labelzvar.set('z')
+		labelz=Tkinter.Label(self.EditPopup,textvariable=labelzvar,anchor="w",fg="black")
+		labelz.grid(column=0,row=1,sticky='EW')
+		self.z= Tkinter.StringVar(self.EditPopup)
+		#For the selected redshift, update the dropdown ion meny accordingly
+		self.z.trace('w',self.UpdateIonMenu)
+		#Sort redshifts numerically (starting with the lowest)
+		self.log['zs'].sort()
+		self.z.set('<z>') # default value
+		self.ZMenu = apply(Tkinter.OptionMenu, (self.EditPopup, self.z) +tuple(self.log['zs']))
+		self.ZMenu.grid(column=1,row=1,stick='EW')
+		#Example code for changing menus (see sample in UpdateLineMenu for other half); don't use.
+		""" 
+		    def __init__(self, master):
+		        tk.Frame.__init__(self, master)
+		        self.dict = {'Asia': ['Japan', 'China', 'Malasia'],
+	                     'Europe': ['Germany', 'France', 'Switzerland']}
+		        self.variable_a = tk.StringVar(self)
+		        self.variable_b = tk.StringVar(self)
+		        self.variable_a.trace('w', self.updateoptions)
+		        self.optionmenu_a = tk.OptionMenu(self, self.variable_a, *self.dict.keys())
+		        self.optionmenu_b = tk.OptionMenu(self, self.variable_b, '')
+		        self.variable_a.set('Asia')
+
+		"""
+
+
+		#Ion dropdown menu
+		labelionvar=Tkinter.StringVar()
+		labelionvar.set('Ion')
+		labelion=Tkinter.Label(self.EditPopup,textvariable=labelionvar,anchor="w",fg="black")
+		labelion.grid(column=0,row=2,sticky='EW')
+		self.ion= Tkinter.StringVar(self.EditPopup)
+		#Need to update the Line Menu
+		self.ion.trace('w',self.UpdateLineMenu)
+		self.ion.set('') # default value
+		self.IonMenu = Tkinter.OptionMenu(self.EditPopup,self.ion,'')
+		self.IonMenu.grid(column=1,row=2,stick='EW')
+
+		#Line dropdown menu
+		labellvar=Tkinter.StringVar()
+		labellvar.set('Line')
+		labelline=Tkinter.Label(self.EditPopup,textvariable=labellvar,anchor="w",fg="black")
+		labelline.grid(column=0,row=3,sticky='EW')
+		self.line= Tkinter.StringVar(self.EditPopup)
+		self.line.set('') # default value
+		self.LineMenu = Tkinter.OptionMenu(self.EditPopup,self.line,'')
+		self.LineMenu.grid(column=1,row=3,stick='EW')
+
+		#Buttons for editing LOG, removing line, removing system, and quitting edit log menu
+		#Each should run the appropriate function:
+		#	Edit logfile - OnChangeLog
+		Editbutton=Tkinter.Button(self.EditPopup,text="Edit Logfile", command=self.OnChangeLog)
+		Editbutton.grid(column=0,row=4,columnspan=2,sticky='EW')
+		#	Remove Line - OnRemoveLine
+		Removebutton=Tkinter.Button(self.EditPopup,text="Remove Line", command=self.OnRemoveLine)
+		Removebutton.grid(column=0,row=5,columnspan=2,sticky='EW')
+		#	Remove System - OnRemoveSystem
+		Systembutton=Tkinter.Button(self.EditPopup,text="Remove System", command=self.OnRemoveSystem)
+		Systembutton.grid(column=0,row=6,columnspan=2,sticky='EW')
+		#	Quit - OnExitEdit
+		Quitbutton=Tkinter.Button(self.EditPopup,text="Quit", command=self.OnExitEdit)
+		Quitbutton.grid(column=0,row=7,columnspan=2,sticky='EW')
+		#Wait for closing the window before proceeding.
+		self.EditMaster.wait_window()
+
+				
+	#Function to quit main LineFinder routine.
+	def onQ(self):
+		#Save log file
+		WriteLog(self.log,self.logfile,self.llistfile,self.fits)
+		#Close event loop
+		self.SpecPlot.stop_event_loop()
+		#Destroy widget
+		self.SProot.destroy()
+		print "Quitting Line Finder"
+		return
+	#Function to run when you need velocity profiles for a given redshift.
+	def onVelPlots(self,z):
+		#Open tutorial message box saying what to do
+		if usetutorial:tkMessageBox.showinfo("Help Window", "Using the velocity profiles, select which lines are associated with the system.")
+		#display velocity plots for given line
+		if debug: print "Running VELPLOTS", self.log, z, self.llist, self.fits
+		#Create a matplotlib figure
+		VPfig=plt.figure(figsize=(8,8))
+		#BIGAX is the full axes instance for the entire figure.
+		bigax = VPfig.add_subplot(111)    # The big subplot
+		#BIGAX is used to set up one label for the x and y axis....
+		#All the tick marks, etc, need to be turned off
+		bigax.spines['top'].set_color('none')
+		bigax.spines['bottom'].set_color('none')
+		bigax.spines['left'].set_color('none')
+		bigax.spines['right'].set_color('none')
+		#bigax.xaxis.tick_labels([])
+		#bigax.yaxis.tick_labels([])
+		bigax.tick_params(labelcolor='none', top='off', bottom='off', left='off', right='off')
+		#Label axes in BIGAX
+		bigax.set_xlabel(r'Relative Velocity (km s$^{-1}$)')
+		bigax.set_ylabel(r'Flux')
+		#Set up the spacing in between subplots
+		VPfig.subplots_adjust(wspace=0.3, hspace=0.5)
+		#Make a widget for selecting velocity profiles to include in LOG
+		VelPlotWin=Tkinter.Toplevel(self.root)
+		#Create a new widget for displaying velocity profiles with matplotlib canvas
+		VProot=Tkinter.Tk()
+		VProot.wm_title("Velocity Profiles")
+		VelFig=FigureCanvasTkAgg(VPfig,master=VProot)
+		VelFig.get_tk_widget().pack(side=Tkinter.TOP, fill=Tkinter.BOTH, expand=1)
+		#Add a matplotlib toolbar for zooming, panning, etc
+		NavVelFig=NavigationToolbar2TkAgg(VelFig, VProot)
+		VPfig.set_canvas(VelFig)
+		if debug: "onVelPlots VPfig figure:", VPfig
+		#Run the VELPLOTS function
+		self.log=VelPlots(self.log,z,self.llist,self.fits,VelPlotWin,VPfig,VelFig)
+		#Save notes to log
+		WriteLog(self.log,self.logfile,self.llistfile,self.fits)
+		VProot.destroy()
+		return
+	#Function for what to do when 'l' is pressed on keyboard
+	#Set up to assume that location of keystroke is a Ly-alpha line
+	#Will find redshift and run OnVelPlots.
+	def onL(self,event):
+		#Get wavelength from where L was pressed on Full Spectrum window
+		wvl=event.xdata
+		#look up the rest wavelength of Ly-a
+		wl,f=self.llist['HI','1215']
+		#Caclulate the redshift
+		z=(wvl/wl)-1
+		if debug: print "Pressed L, running onVelPlots"
+		#Run onVelPlots and save to log
+		self.onVelPlots(z)
+		#WriteLog(self.log,self.logfile,self.llistfile,self.fits)
+		return
+	#Function to run when 'z' ia pressed.
+	#This will ask user for a redshift, see if it is a float
+	#if so, pass the redshift to OnVelPlots.
+	def onZ(self):
+		z=float(raw_input("What redshift do you need: "))
+		if IsFloat(z):	self.onVelPlots(z)
+		else: print "Invalid Redshift, try again"
+		#WriteLog(self.log,self.logfile,self.llistfile,self.fits)
+		return
+	#Function when 'a' is pressed.
+	#This will ask the user for a given ion/line ID to calculate a redshift
+	#From cursor position.
+	def onA(self,event):
+		#Open tutorial message box saying what to do
+		if usetutorial:tkMessageBox.showinfo("Help Window", "Use the terminal window to select which line to use.")
+		#Get wavelength position of cursor on Full Spectrum window
+		wvl=float(event.xdata)
+		ion=None#ION name placeholder
+		line=None#LINE ID name placeholder
+		badion=True#Boolean to see if the ion selected is in linelist(TRUE)
+		badline=True#boolean to see if the line ID selecte is in linelist(TRUE)
+		#Ask user for a valid ION from the linelist (complete list is displayed)
+		#Will exit once a proper ION is submitted
+		while badion:
+			print "IONS: ",self.llist['ions']
+			ion=raw_input("What ION do you need: ")
+			if ion in self.llist['ions']:
+				badion=False
+			else: print "Bad ION, try again"
+		#Do the same, but look for a valid line ID based on ion chose.
+		while badline:
+			print "LINES: ",self.llist['lines'][ion]
+			line=raw_input("What LINE do you need: ")
+			if line in self.llist['lines'][ion]:
+				badline=False
+			else: print "Bad LINE, try again"
+		#Check to see if in linelist (SOMETHING IS WRONG IF NOT)
+		if (ion,line) in self.llist:
+			#Grab the restwavelength, and get redshift
+			wl,f=self.llist[ion,line]
+			z=(wvl/wl)-1
+			if debug: print "OnA redshift",z
+			#Pass redshift onto onVelPlots
+			self.onVelPlots(z)
+		else: print "ION,LINE not in Line List. Try again"
+		#WriteLog(self.log,self.logfile,self.llistfile,self.fits)
+		return
+	#What to do if 'e' is pressed
+	#This will open the Log editing menu
+	def onE(self):
+		#Open tutorial message box saying what to do
+		if usetutorial:tkMessageBox.showinfo("Help Window", "Use the dropdown menu to edit logfile.")
+		#Create log editing menu child widget
+		LogMenuWin=Tkinter.Toplevel(self.root)
+		#Send this to the Logmenu routine
+		self.LogMenu(LogMenuWin)
+		#Close widget when done
+		LogMenuWin.destroy()
+		#Save information to log
+		WriteLog(self.log,self.logfile,self.llistfile,self.fits)
+		return
+	#What to do if 'h' is pressed'
+	#This will display a list of keys to press in terminal
+	def onH(self):
+		print 'q - quit loop and save logfile'
+		print 'a - add system line (on cursor position and command line entry)'
+		print 'l - select lya line (on cursor position & show potential absorption)'
+		print 'z - display potential absorption for input redshift (command line entry)'
+		print 'e - edit log, colours, notes (interface)'
+		print 'h - help'
+		return
+	#Function to figure out, based on a keyboard event, what function to run
+	#If key the key will change the log file, it needs to run the Full Spectrum plot update
+	def onKey(self,event):
+		if debug: print "Event: ", event.key, event.xdata,event.ydata
+		if event.key=='q': self.onQ()
+		elif event.key=='a': self.onA(event)
+		elif event.key=='l': self.onL(event)
+		elif event.key=='z': self.onZ()
+		elif event.key=='e': self.onE()
+		elif event.key=='h': self.onH()
+		#Update spectrum window if something has changed
+		if event.key not in ['q','h']: self.UpdatePlot()
+		return
+	#What to do when the Find Lines button is pressed on the main widget
+	def OnFindLines(self):
+		#Load log file (if it exists)
+		self.logfile=self.entryOut.get()
+		self.log=LoadLog(self.logfile)
+		#Load linelist
+		self.llistfile=self.entryLlist.get()
+		self.llist=LoadLineList(self.llistfile)
+		if debug: print "LLIST:",self.llist
+		#Open Figure
+		self.fits=self.specIn.get()
+		self.PlotFits()
+		self.UpdatePlot()
+		if debug: print "FIGURE:",self.SpecPlot
+		if debug: print "Displaying Figure"
+		#For help, display potential keys to start
+		self.onH()
+		#Show plotting window and wait for keys to be pressed indefinetly
+		self.SpecPlot.show()
+		self.SpecPlot.mpl_connect('key_press_event',self.onKey)
+		#Open tutorial message box saying what to do
+		if usetutorial:tkMessageBox.showinfo("Help Window", "Use mouse/keyboard to interact with plot."\
+			+" Press 'h' in plot window to display keyboard shortcuts in terminal.")
+		self.SpecPlot.start_event_loop(0)
+
+#This iis the Main program. Pretty simple eh?
+if __name__=="__main__":
+        app=linefinder_tk(None)
+        app.title('LineFinder')#Name of application
+        print "Starting TB's Line Finder GUI"
+        app.mainloop()
