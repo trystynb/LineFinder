@@ -2,6 +2,8 @@
 
 """ 
 TB_LINEFINDER.PY
+v1.2.1 (5/02/2016)
+	Previous version was not loading limits properly from log. This is now fixed.
 v1.2 (11/01/2016)
 	MAJOR revisions are:
 		-Changed element selection in LINEADDER from radiobuttons to checkbox
@@ -510,14 +512,14 @@ class UpdateLog:
 		#Get the flag information from the log
 		flags=int(self.log[self.zstr,self.ion,self.line,'flag'])
 		#If flag contains an 8, it is a lower limit
-		initLower=((flags%8==0)*(flags>0))
+		initLower=(flags>=8)
 		#remove the 8 from the flag if necessary
 		if initLower: flags-=8
 		#If flag contains 4, it is an upper limit (remove if necessary)
-		initUpper=((flags%4==0)*(flags>0))
+		initUpper=(flags>=4)
 		if initUpper: flags-=4
 		#If flag contains a 2, it is a blend (remove again...)
-		initBlend=((flags%2==0)*(flags>0))
+		initBlend=(flags>=2)
 		if initBlend: flags-=2
 		#If flag is 1, it is OK to use!
 		initOK=(flags==1)
